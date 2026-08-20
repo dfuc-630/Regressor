@@ -118,7 +118,7 @@ If the three sources conflict: the code may be outdated, or the graph may need u
 
 Before proposing or touching a single line of code, the agent must have:
 
-- The relevant requirements & business rules (from Neo4j).
+- The relevant requirements & business rules (from Neo4j) using catalog.yml.
 - Blast radius / impact analysis (from Neo4j + GitNexus `impact()`).
 - The affected symbols & components (from Neo4j + Serena `find_symbol`).
 - The execution flow, if the logic is complex (from GitNexus `context()`).

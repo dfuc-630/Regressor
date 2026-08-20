@@ -1,0 +1,155 @@
+queries:
+  # ── KNOWLEDGE QUERIES ──────────────────────────────────────
+  
+  feature_overview:
+    description: "Tổng quan feature: requirements, rules, components, tasks"
+    params: {feature_id: string}
+    cypher: |
+      MATCH (f:Feature {id: $feature_id})-[:HAS_VERSION]->(v:Version {is_active: true})
+      OPTIONAL MATCH (v)-[:DEFINES]->(r:Requirement)
+      OPTIONAL MATCH (v)-[:DEFINES]->(br:BusinessRule)
+      OPTIONAL MATCH (v)-[:DEFINES]->(c:Component)
+      OPTIONAL MATCH (v)-[:DEFINES]->(t:Task)
+      RETURN f.name, v.name as version,
+             collect(DISTINCT {id: r.id, text: r.text, priority: r.priority}) as requirements,
+             collect(DISTINCT {id: br.id, when: br.when_condition, then: br.then_action}) as rules,
+             collect(DISTINCT {id: c.id, type: c.type, responsibility: c.responsibility}) as components,
+             collect(DISTINCT {id: t.id, status: t.status, desc: t.description}) as tasks
+
+  business_rules_for_feature:
+    description: "Tất cả business rules của 1 feature, sắp theo priority"
+    params: {feature_id: string}
+    cypher: |
+      MATCH (f:Feature {id: $feature_id})-[:HAS_VERSION]->(v:Version {is_active: true})
+             -[:DEFINES]->(br:BusinessRule)
+      OPTIONAL MATCH (br)-[:APPLIES_TO]->(req:Requirement)
+      RETURN br.id, br.when_condition, br.then_action, br.reason, br.priority,
+             br.examples, collect(req.id) as applies_to_requirements
+      ORDER BY br.priority DESC
+
+  data_model_for_feature:
+    description: "Data models: entities, fields, storage locations"
+    params: {feature_id: string}
+    cypher: |
+      MATCH (f:Feature {id: $feature_id})-[:HAS_VERSION]->(v:Version {is_active: true})
+             -[:DEFINES]->(e:Entity)
+      OPTIONAL MATCH (fld:Field)-[:BELONGS_TO]->(e)
+      RETURN e.id, e.name, e.storage, e.collection_or_table,
+             collect({name: fld.name, type: fld.type, required: fld.required, 
+                      indexed: fld.indexed, example: fld.example}) as fields
+
+  api_contracts:
+    description: "API endpoints của 1 feature"
+    params: {feature_id: string}
+    cypher: |
+      MATCH (f:Feature {id: $feature_id})-[:HAS_VERSION]->(v:Version {is_active: true})
+             -[:DEFINES]->(ep:Endpoint)
+      RETURN ep.id, ep.method, ep.path, ep.auth, ep.rate_limit, ep.cache_strategy,
+             ep.params_json, ep.responses_json, ep.errors_json
+
+  decisions_history:
+    description: "Lịch sử quyết định kiến trúc"
+    params: {feature_id: string}
+    cypher: |
+      MATCH (f:Feature {id: $feature_id})-[:HAS_VERSION]->(v)-[:DEFINES]->(d:Decision)
+      OPTIONAL MATCH (d)-[:SUPERSEDES]->(old:Decision)
+      OPTIONAL MATCH (d)-[:AFFECTS]->(c:Component)
+      RETURN d.id, d.title, d.decision, d.context, d.date, d.status, d.impact,
+             d.alternatives_json,
+             collect(DISTINCT c.id) as affected_components,
+             old.id as supersedes
+      ORDER BY d.date DESC
+
+  glossary_lookup:
+    description: "Tra cứu thuật ngữ"
+    params: {term_name: string}
+    cypher: |
+      MATCH (t:Term)
+      WHERE t.name = $term_name OR $term_name IN t.aliases
+      OPTIONAL MATCH (t)-[:USED_BY]->(ref)
+      RETURN t.name, t.definition, t.context, t.aliases,
+             collect({id: ref.id, label: labels(ref)[0]}) as used_by
+
+  # ── DEPENDENCY & IMPACT QUERIES ────────────────────────────
+
+  component_dependencies:
+    description: "Dependency graph của 1 component (upstream + downstream)"
+    params: {component_id: string}
+    cypher: |
+      MATCH (c:Component {id: $component_id})
+      OPTIONAL MATCH (c)<-[:FROM]-(d_out:Dependency)-[:TO]->(target)
+      OPTIONAL MATCH (source)<-[:FROM]-(d_in:Dependency)-[:TO]->(c)
+      RETURN c.id, c.responsibility,
+             collect(DISTINCT {dep_id: d_out.id, type: d_out.type, target: target.id}) as depends_on,
+             collect(DISTINCT {dep_id: d_in.id, type: d_in.type, source: source.id}) as depended_by
+
+  impact_analysis:
+    description: "Blast radius: mọi thứ bị ảnh hưởng nếu thay đổi 1 component"
+    params: {component_id: string}
+    cypher: |
+      MATCH (c:Component {id: $component_id})
+      OPTIONAL MATCH (c)<-[:IMPLEMENTS]-(t:Task)
+      OPTIONAL MATCH (c)-[:MAPS_TO_SYMBOL]->(s:Symbol)
+      OPTIONAL MATCH (c)-[:IMPLEMENTS]->(r:Requirement)
+      OPTIONAL MATCH (d:Decision)-[:AFFECTS]->(c)
+      OPTIONAL MATCH (source)<-[:FROM]-(dep:Dependency)-[:TO]->(c)
+      RETURN c.id, c.responsibility,
+             collect(DISTINCT s.name) as code_symbols,
+             collect(DISTINCT t.id) as related_tasks,
+             collect(DISTINCT r.id) as implements_requirements,
+             collect(DISTINCT d.title) as related_decisions,
+             collect(DISTINCT source.id) as upstream_components
+
+  symbol_to_knowledge:
+    description: "Từ tên code symbol → tìm tất cả knowledge liên quan"
+    params: {symbol_name: string}
+    cypher: |
+      MATCH (s:Symbol {name: $symbol_name})<-[:MAPS_TO_SYMBOL]-(c:Component)
+      OPTIONAL MATCH (c)-[:IMPLEMENTS]->(r:Requirement)
+      OPTIONAL MATCH (c)<-[:IMPLEMENTS]-(t:Task)
+      OPTIONAL MATCH (v:Version)-[:DEFINES]->(c)
+      OPTIONAL MATCH (br:BusinessRule)-[:APPLIES_TO]->(r)
+      RETURN s.name, c.id, c.responsibility, v.name as version,
+             collect(DISTINCT r) as requirements,
+             collect(DISTINCT br) as business_rules,
+             collect(DISTINCT t) as tasks
+
+  # ── TASK MEMORY QUERIES ────────────────────────────────────
+
+  pending_tasks:
+    description: "Tất cả task chưa hoàn thành, sắp theo phase"
+    params: {feature_id: string?}
+    cypher: |
+      MATCH (t:Task {status: "TODO"})
+      OPTIONAL MATCH (v:Version)-[:DEFINES]->(t)
+      OPTIONAL MATCH (f)-[:HAS_VERSION]->(v)
+      WHERE $feature_id IS NULL OR f.id = $feature_id
+      RETURN t.id, t.description, t.assignee, t.phase,
+             f.id as feature, v.name as version
+      ORDER BY t.phase ASC
+
+  task_history:
+    description: "Lịch sử tasks đã hoàn thành"
+    params: {feature_id: string}
+    cypher: |
+      MATCH (f {id: $feature_id})-[:HAS_VERSION]->(v)-[:DEFINES]->(t:Task {status: "DONE"})
+      RETURN t.id, t.description, t.completed_by, t.date, v.name as version
+      ORDER BY t.date DESC
+
+  # ── CROSS-FEATURE QUERIES ──────────────────────────────────
+
+  features_depending_on_system:
+    description: "Features nào đang phụ thuộc vào 1 system"
+    params: {system_id: string}
+    cypher: |
+      MATCH (f:Feature)-[:HAS_VERSION]->(v:Version)-[:DEPENDS_ON_TOPIC]->(s:System {id: $system_id})
+      RETURN DISTINCT f.id, f.name
+
+  full_knowledge_dump:
+    description: "Dump toàn bộ knowledge cho 1 feature (dùng khi agent cần context đầy đủ)"
+    params: {feature_id: string}
+    cypher: |
+      MATCH (f:Feature {id: $feature_id})-[:HAS_VERSION]->(v:Version {is_active: true})
+      OPTIONAL MATCH (v)-[:DEFINES]->(n)
+      RETURN f.name, v.name, 
+             collect({type: labels(n)[0], id: n.id, data: properties(n)}) as all_knowledge
